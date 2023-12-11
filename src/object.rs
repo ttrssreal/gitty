@@ -76,7 +76,7 @@ impl GitObjectStore {
         
         match kind {
             GitObjectKind::Blob => {
-                let obj_content = dbg!(header_content.next()?);
+                let obj_content = header_content.next()?;
 
                 return Some(GitObject {
                     id,
