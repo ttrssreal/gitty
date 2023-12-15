@@ -29,11 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stdout = std::io::stdout();
 
             if cat_file_args.mode.print {
-                obj.dump_content(stdout.lock())?;
+                println!("{obj}");
             }
 
             if cat_file_args.mode.type_ {
-                obj.dump_type(stdout.lock())?;
+                println!("{}", obj.to_string());
             }
 
             stdout.flush()?;
