@@ -1,45 +1,124 @@
+use std::fmt::Display;
 use std::fs::File;
 use compress;
 use std::io::Read;
-use std::io::Write;
 
 #[derive(Debug, PartialEq)]
-pub enum GitObjectKind {
-    Blob,
-    Tree,
-    Commit,
-    Tag,
+pub struct TreeEntry {
+    pub mode: u32,
+    pub kind: String,
+    pub name: String,
+    pub id: [u8; 20],
 }
 
-impl GitObjectKind {
-    pub fn to_string(&self) -> String {
-        match self {
-            GitObjectKind::Blob => String::from("blob"),
-            GitObjectKind::Tree => String::from("tree"),
-            GitObjectKind::Commit => String::from("commit"),
-            GitObjectKind::Tag => String::from("tag"),
-        }
-    }
+#[derive(Debug, PartialEq)]
+pub struct ExtraHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GitObjectData {
+    Blob {
+        data: Vec<u8>,
+    },
+    Tree {
+        entries: Vec<TreeEntry>,
+    },
+    Commit {
+        tree: [u8; 20],
+        parents: Vec<[u8; 20]>,
+        author: String,
+        committer: String,
+        encoding: Option<String>,
+        extra_headers: Vec<ExtraHeader>,
+        message: Vec<u8>,
+    },
+    Tag {
+        object: [u8; 20],
+        kind: String,
+        tag: String,
+        tagger: String,
+        message: String,
+    },
+    
 }
 
 #[derive(Debug)]
 pub struct GitObject {
     pub id: [u8; 20],
-    pub kind: GitObjectKind,
     pub size: usize,
-    pub content: Vec<u8>,
+    pub content: GitObjectData,
 }
 
 impl GitObject {
-    pub fn dump_content<W: Write>(&self, mut w: W) -> std::io::Result<()> {
-        w.write_all(&self.content)?;
-        Ok(())
+    pub fn to_string(&self) -> String {
+        match self.content {
+            GitObjectData::Blob {..} => "blob",
+            GitObjectData::Tree {..} => "tree",
+            GitObjectData::Commit {..} => "commit",
+            GitObjectData::Tag {..} => "tag",
+        }
+        .to_string()
     }
+}
 
-    pub fn dump_type<W: Write>(&self, mut w: W) -> std::io::Result<()> {
-        w.write_all(&self.kind.to_string().as_bytes())?;
-        w.write(b"\n")?;
-        Ok(())
+impl Display for TreeEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.name)
+    }
+}
+
+impl Display for GitObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match &self.content {
+            GitObjectData::Blob { data } => {
+                write!(f, "{}", String::from_utf8_lossy(&data))
+            },
+            GitObjectData::Tree { entries } => {
+                for entry in entries {
+                    writeln!(f, "{}", entry)?;
+                }
+                Ok(())
+            },
+            GitObjectData::Commit {
+                tree,
+                parents,
+                author,
+                committer,
+                encoding,
+                extra_headers,
+                message
+            } => {
+                writeln!(f, "tree {}", hex::encode(tree))?;
+
+                for parent in parents {
+                    writeln!(f, "parent {}", hex::encode(parent))?;
+                }
+
+                writeln!(f, "author {}", author)?;
+                writeln!(f, "committer {}", committer)?;
+                
+                if let Some(encoding) = encoding {
+                    writeln!(f, "encoding {}", encoding)?;
+                }
+                
+                for extra_header in extra_headers {
+                    writeln!(f, "{}: {}", extra_header.name, extra_header.value)?;
+                }
+
+                write!(f, "\n")?;
+                write!(f, "{}", String::from_utf8_lossy(message))
+            },
+            GitObjectData::Tag { object, kind, tag, tagger, message } => {
+                write!(f, "object {}\n", hex::encode(object))?;
+                write!(f, "type {}\n", kind)?;
+                write!(f, "tag {}\n", tag)?;
+                write!(f, "tagger {}\n", tagger)?;
+                write!(f, "\n")?;
+                write!(f, "{}", message)
+            },
+        }
     }
 }
 
@@ -58,38 +137,140 @@ impl GitObjectStore {
             .read_to_end(&mut contents).ok()?;
 
         let mut header_content = contents
-            .splitn(2, |byte| *byte == '\0' as u8);
+            .splitn(2, |&byte| byte == '\0' as u8);
 
-        let mut header_split = header_content.next()?
-            .split(|byte| *byte == ' ' as u8);
+        let mut kind_size = header_content.next()?
+            .split(|&byte| byte == ' ' as u8);
+
+        let kind = kind_size.next()?;
         
-        let kind = match header_split.next()? {
-            b"blob" => GitObjectKind::Blob,
-            b"commit" => GitObjectKind::Commit,
-            b"tree" => GitObjectKind::Tree,
-            b"tag" => GitObjectKind::Tag,
+        let size = String::from_utf8_lossy(kind_size.next()?)
+            .parse::<usize>().ok()?;
+        
+        let content = match kind {
+            b"blob" => GitObjectData::Blob {
+                data: header_content.next()?.to_vec(),
+            },
+            b"commit" => {
+                let buffer = header_content.next()?;
+                let mut lines = buffer
+                    .split(|&byte| byte == '\n' as u8);                
+                
+                let tree = lines.next()?;
+
+                if !tree.starts_with(b"tree ") {
+                    println!("Invalid commit object. Expected tree");
+                    return None;
+                }
+
+                let tree = &tree[5..];
+                let tree = hex::decode(tree).ok()?;
+                let tree: [u8; 20] = tree.try_into().ok()?;
+
+                let mut author_line = Vec::new();
+                let mut parents = Vec::new();
+                
+                while let Some(parent) = lines.next() {
+                    if !parent.starts_with(b"parent ") {
+                        author_line = parent.to_vec();
+                        break;
+                    }
+
+                    let parent = &parent[7..];
+                    let parent = hex::decode(parent).ok()?;
+
+                    parents.push(parent.try_into().ok()?);
+                }
+
+                if !author_line.starts_with(b"author ") {
+                    println!("Invalid commit object. Expected author");
+                    return None;
+                }
+                let author = &author_line[7..];
+                let author = String::from_utf8_lossy(author).to_string();
+
+                let committer = lines.next()?;
+                if !committer.starts_with(b"committer ") {
+                    println!("Invalid commit object. Expected committer");
+                    return None;
+                }
+                let committer = &committer[10..];
+                let committer = String::from_utf8_lossy(committer).to_string();
+
+                let mut encoding = None;
+                let mut next_line = lines.clone().peekable();
+                let next_line = next_line.peek()?;
+
+                if next_line.starts_with(b"encoding ") {
+                    let enc_line = &&next_line[10..];
+                    encoding = Some(String::from_utf8_lossy(enc_line).to_string());
+                }
+
+                let mut extra_headers = Vec::new();
+                let mut current_line = Vec::new();
+
+                while let Some(line) = lines.next() {
+                    /* continuation */
+                    if line.starts_with(b" ") {
+                        current_line.extend_from_slice(&line[1..]);
+                        current_line.push(b'\n');
+                        continue;
+                    }
+                    
+                    if line.starts_with(b"gpgsig ") || line.len() == 0 {
+                        if current_line.len() != 0 {
+                            extra_headers.push(ExtraHeader {
+                                name: String::from("gpgsig"),
+                                value: String::from_utf8_lossy(&current_line[..current_line.len()]).to_string(),
+                            });
+                        }
+
+                        if line.len() == 0 {
+                            break;
+                        }
+                        
+                        current_line.clear();
+                        current_line.extend_from_slice(&line[7..]);
+                        current_line.push(b'\n');
+                        continue;
+                    }
+                }
+
+                let mut message = Vec::new();
+
+                let msg_start = buffer
+                    .windows(2)
+                    .position(|delim| delim.starts_with(b"\n\n"))? + 2;
+
+                message.extend_from_slice(&buffer[msg_start..]);
+
+                GitObjectData::Commit {
+                    tree,
+                    parents,
+                    author,
+                    committer,
+                    encoding,
+                    extra_headers,
+                    message,
+                }
+            },
+            b"tree" => GitObjectData::Tree {
+                entries: Vec::new(),
+            },
+            b"tag" => GitObjectData::Tag {
+                object: [0xa; 20],
+                kind: String::from("unimplemented"),
+                tag: String::from("unimplemented"),
+                tagger: String::from("unimplemented"),
+                message: String::from("unimplemented"),
+            },
             _ => return None
         };
 
-        let size = String::from_utf8_lossy(header_split.next()?)
-            .parse::<usize>().ok()?;
-        
-        match kind {
-            GitObjectKind::Blob => {
-                let obj_content = header_content.next()?;
-
-                return Some(GitObject {
-                    id,
-                    kind,
-                    size,
-                    content: obj_content.to_vec(),
-                });
-            },
-            GitObjectKind::Commit => {},
-            GitObjectKind::Tree => {},
-            GitObjectKind::Tag => {},
-        }
-
-        None
+        Some(GitObject {
+            id,
+            size,
+            content,
+        })
     }
 }
