@@ -254,8 +254,70 @@ impl GitObjectStore {
                     message,
                 }
             },
-            b"tree" => GitObjectData::Tree {
-                entries: Vec::new(),
+            b"tree" => {
+                let buffer = header_content.next()?;
+
+                let mut entries = Vec::new();
+
+                let mut mode = Vec::new();
+                let mut name = Vec::new();
+                let mut id = Vec::new();
+
+                #[derive(Clone, Copy, PartialEq, Debug)]
+                enum State {
+                    Mode,
+                    Name,
+                    Id,
+                }
+
+                let mut state = State::Mode;
+
+                for &c in buffer {
+                    match (state, c) {
+                        (State::Mode, b' ') => {
+                            state = State::Name;
+                        },
+                        (State::Name, b'\0') => {
+                            state = State::Id;
+                        },
+                        (State::Id, _) => {
+                            id.push(c);
+
+                            if id.len() >= 20 {
+                                let id_buf = id.clone().try_into().ok()?;
+                                let mode_str = String::from_utf8_lossy(&mode).to_string();
+
+                                entries.push(TreeEntry {
+                                    mode: u32::from_str_radix(&mode_str, 8).ok()?,
+                                    kind: GitObjectStore::get(id_buf)?.to_string(),
+                                    name: String::from_utf8_lossy(&name).to_string(),
+                                    id: id_buf,
+                                });
+
+                                mode.clear();
+                                name.clear();
+                                id.clear();
+
+                                state = State::Mode;
+                            }
+                        },
+                        (State::Mode, _) => {
+                            mode.push(c);
+                        },
+                        (State::Name, _) => {
+                            name.push(c);
+                        }
+                    }
+                }
+
+                if state != State::Mode {
+                    println!("Invalid tree object");
+                    return None;
+                }
+
+                GitObjectData::Tree {
+                    entries,
+                }
             },
             b"tag" => GitObjectData::Tag {
                 object: [0xa; 20],
