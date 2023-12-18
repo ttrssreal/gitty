@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stdout = std::io::stdout();
 
             if cat_file_args.mode.print {
-                println!("{obj}");
+                print!("{obj}");
             }
 
             if cat_file_args.mode.type_ {
