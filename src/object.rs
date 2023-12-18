@@ -65,7 +65,7 @@ impl GitObject {
 
 impl Display for TreeEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.name)
+        write!(f, "{:06o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.name)
     }
 }
 
