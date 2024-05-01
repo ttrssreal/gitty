@@ -41,7 +41,8 @@ pub enum GitObjectData {
         kind: String,
         tag: String,
         tagger: String,
-        message: String,
+        // If signed the signature resides in the message itself
+        message: Vec<u8>,
     },
     
 }
@@ -117,28 +118,24 @@ impl Display for GitObject {
                 write!(f, "tag {}\n", tag)?;
                 write!(f, "tagger {}\n", tagger)?;
                 write!(f, "\n")?;
-                write!(f, "{}", message)
+                write!(f, "{}", String::from_utf8_lossy(message))
             },
         }
     }
 }
 
-fn parse_commit_header<'a, I>(data: &mut Peekable<I>) -> Option<(String, String)>
+fn parse_header<'a, I>(data: &mut Peekable<I>) -> Option<(String, String)>
 where
     I: Iterator<Item = &'a u8>
 {
-    let header_key: Vec<u8> = data
-        .take_while(|&b| *b != b' ')
-        .map(|&b| b)
-        .collect();
+    let header_key: Vec<u8> = data.take_while(|&b| *b != b' ')
+        .map(|&b| b).collect();
 
     let mut header_value = Vec::new();
 
     loop {
-        let line: Vec<u8> = data
-            .take_while(|&b| *b != b'\n')
-            .map(|&b| b)
-            .collect();
+        let line: Vec<u8> = data.take_while(|&b| *b != b'\n')
+            .map(|&b| b).collect();
 
         header_value.extend(line);
 
@@ -159,14 +156,14 @@ where
     Some((header_key, header_value))
 }
 
-fn parse_commit_headers<'a, I>(data: &mut Peekable<I>) -> Option<HashMap<String, Vec<String>>>
+fn parse_headers<'a, I>(data: &mut Peekable<I>) -> Option<HashMap<String, Vec<String>>>
 where
     I: Iterator<Item = &'a u8>
 {
     let mut headers: HashMap<String, Vec<String>> = HashMap::new();
 
     while **data.peek()? != b'\n' {
-        let header = parse_commit_header(data)?;
+        let header = parse_header(data)?;
         let key = header.0;
         let values = header.1;
         headers.entry(key).or_default().push(values);
@@ -179,20 +176,14 @@ fn parse_tree_entry<'a, I>(data: &mut Peekable<I>) -> Option<TreeEntry>
 where
     I: Iterator<Item = &'a u8>
 {
-    let mode: Vec<u8> = data
-        .take_while(|&&b| b != b' ')
-        .map(|&b| b)
-        .collect();
+    let mode: Vec<u8> = data.take_while(|&&b| b != b' ')
+        .map(|&b| b).collect();
 
-    let path: Vec<u8> = data
-        .take_while(|&&b| b != b'\0')
-        .map(|&b| b)
-        .collect();
+    let path: Vec<u8> = data.take_while(|&&b| b != b'\0')
+        .map(|&b| b).collect();
 
-    let id: Vec<u8> = data
-        .take(SHA1_HASH_SIZE)
-        .map(|&b| b)
-        .collect();
+    let id: Vec<u8> = data.take(SHA1_HASH_SIZE)
+        .map(|&b| b).collect();
 
     let mode = std::str::from_utf8(&mode[..]).ok()?;
     let path = std::str::from_utf8(&path[..]).ok()?;
@@ -241,7 +232,7 @@ fn parse_blob(data: &[u8]) -> Option<GitObjectData> {
 fn parse_commit(data: &[u8]) -> Option<GitObjectData> {
     let mut data = data.iter().peekable();
 
-    let headers = parse_commit_headers(&mut data)?;
+    let headers = parse_headers(&mut data)?;
 
     if !headers.contains_key("tree") || headers.get("tree")?.is_empty() {
         eprintln!("parse_commit(): tree or parent headers");
@@ -314,6 +305,42 @@ fn parse_tree(data: &[u8]) -> Option<GitObjectData> {
     })
 }
 
+fn parse_tag(data: &[u8]) -> Option<GitObjectData> {
+    let mut data = data.iter().peekable();
+
+    let headers = parse_headers(&mut data)?;
+
+    let object = headers.get("object")?
+        .first()?.to_string();
+
+    let kind = headers.get("type")?
+        .first()?.to_string();
+
+    let tag = headers.get("tag")?
+        .first()?.to_string();
+
+    let tagger = headers.get("tagger")?
+        .first()?.to_string();
+
+    let object: [u8; SHA1_HASH_SIZE] = hex::decode(object)
+        .ok()?.try_into().ok()?;
+
+    // Eat final newline before message body
+    if *data.next()? != b'\n' {
+        eprintln!("parse_commit(): can't find commit message");
+    }
+
+    let message = data.map(|&b| b).collect();
+
+    Some(GitObjectData::Tag {
+        object,
+        kind,
+        tag,
+        tagger,
+        message,
+    })
+}
+
 pub struct GitObjectStore;
 
 impl GitObjectStore {
@@ -332,19 +359,13 @@ impl GitObjectStore {
 
         // Git object TLV encoding:
         //  <obj-type> ' ' <byte-size> '\0' <object-data>
-        let [header, data] = data
-            .splitn(2, |&b| b == b'\0')
-            .by_ref()
-            .collect::<Vec<&[u8]>>()[..]
-            else {
+        let [header, data] = data.splitn(2, |&b| b == b'\0')
+            .by_ref().collect::<Vec<&[u8]>>()[..] else {
                 return None;
             };
 
-        let [kind, size] = header
-            .splitn(2, |&b| b == b' ') // FIXME: replace with split_once?
-            .by_ref()
-            .collect::<Vec<&[u8]>>()[..]
-            else {
+        let [kind, size] = header.splitn(2, |&b| b == b' ')
+            .by_ref().collect::<Vec<&[u8]>>()[..] else {
                 return None;
             };
 
@@ -354,13 +375,7 @@ impl GitObjectStore {
             b"blob" => parse_blob(data)?,
             b"commit" => parse_commit(data)?,
             b"tree" => parse_tree(data)?,
-            b"tag" => GitObjectData::Tag {
-                object: [0xa; SHA1_HASH_SIZE],
-                kind: String::from("unimplemented"),
-                tag: String::from("unimplemented"),
-                tagger: String::from("unimplemented"),
-                message: String::from("unimplemented"),
-            },
+            b"tag" => parse_tag(data)?,
             _ => return None
         };
 
