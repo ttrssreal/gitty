@@ -2,19 +2,19 @@ use std::fmt::Display;
 use std::fs::File;
 use compress;
 use std::io::Read;
+use std::iter::{Peekable, Iterator};
+use std::collections::HashMap;
+use std::option::Option;
 
+pub const SHA1_HASH_SIZE: usize = 20;
+
+// "Each entry has a sha1 identifier, pathname and mode."
 #[derive(Debug, PartialEq)]
 pub struct TreeEntry {
     pub mode: u32,
     pub kind: String,
-    pub name: String,
-    pub id: [u8; 20],
-}
-
-#[derive(Debug, PartialEq)]
-pub struct ExtraHeader {
-    pub name: String,
-    pub value: String,
+    pub path: String,
+    pub id: [u8; SHA1_HASH_SIZE],
 }
 
 #[derive(Debug, PartialEq)]
@@ -26,16 +26,18 @@ pub enum GitObjectData {
         entries: Vec<TreeEntry>,
     },
     Commit {
-        tree: [u8; 20],
-        parents: Vec<[u8; 20]>,
+        tree: [u8; SHA1_HASH_SIZE],
+        parents: Vec<[u8; SHA1_HASH_SIZE]>,
+        // https://docs.github.com/en/pull-requests/committing-changes-to-your-project/creating-and-editing-commits/creating-a-commit-with-multiple-authors
+        // assuming git doesn't support multiple authors/committers
         author: String,
         committer: String,
         encoding: Option<String>,
-        extra_headers: Vec<ExtraHeader>,
+        gpgsig: Option<String>,
         message: Vec<u8>,
     },
     Tag {
-        object: [u8; 20],
+        object: [u8; SHA1_HASH_SIZE],
         kind: String,
         tag: String,
         tagger: String,
@@ -46,32 +48,31 @@ pub enum GitObjectData {
 
 #[derive(Debug)]
 pub struct GitObject {
-    pub id: [u8; 20],
+    pub id: [u8; SHA1_HASH_SIZE],
     pub size: usize,
-    pub content: GitObjectData,
+    pub data: GitObjectData,
 }
 
 impl GitObject {
-    pub fn to_string(&self) -> String {
-        match self.content {
+    pub fn type_string(&self) -> String {
+        match self.data {
             GitObjectData::Blob {..} => "blob",
             GitObjectData::Tree {..} => "tree",
             GitObjectData::Commit {..} => "commit",
             GitObjectData::Tag {..} => "tag",
-        }
-        .to_string()
+        }.to_string()
     }
 }
 
 impl Display for TreeEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:06o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.name)
+        write!(f, "{:06o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.path)
     }
 }
 
 impl Display for GitObject {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match &self.content {
+        match &self.data {
             GitObjectData::Blob { data } => {
                 write!(f, "{}", String::from_utf8_lossy(&data))
             },
@@ -87,7 +88,7 @@ impl Display for GitObject {
                 author,
                 committer,
                 encoding,
-                extra_headers,
+                gpgsig,
                 message
             } => {
                 writeln!(f, "tree {}", hex::encode(tree))?;
@@ -102,9 +103,9 @@ impl Display for GitObject {
                 if let Some(encoding) = encoding {
                     writeln!(f, "encoding {}", encoding)?;
                 }
-                
-                for extra_header in extra_headers {
-                    writeln!(f, "{}: {}", extra_header.name, extra_header.value)?;
+
+                if let Some(gpgsig) = gpgsig {
+                    writeln!(f, "gpgsig {}", gpgsig)?;
                 }
 
                 write!(f, "\n")?;
@@ -122,205 +123,239 @@ impl Display for GitObject {
     }
 }
 
+fn parse_commit_header<'a, I>(data: &mut Peekable<I>) -> Option<(String, String)>
+where
+    I: Iterator<Item = &'a u8>
+{
+    let header_key: Vec<u8> = data
+        .take_while(|&b| *b != b' ')
+        .map(|&b| b)
+        .collect();
+
+    let mut header_value = Vec::new();
+
+    loop {
+        let line: Vec<u8> = data
+            .take_while(|&b| *b != b'\n')
+            .map(|&b| b)
+            .collect();
+
+        header_value.extend(line);
+
+        match *data.peek()? {
+            // Do we encounter a continuation character?
+            b' ' => {
+                // Consume it, push a newline and continue parsing the header
+                data.next();
+                header_value.push(b'\n');
+            },
+            _ => break,
+        }
+    }
+
+    let header_key = String::from_utf8_lossy(&header_key).to_string();
+    let header_value = String::from_utf8_lossy(&header_value).to_string();
+
+    Some((header_key, header_value))
+}
+
+fn parse_commit_headers<'a, I>(data: &mut Peekable<I>) -> Option<HashMap<String, Vec<String>>>
+where
+    I: Iterator<Item = &'a u8>
+{
+    let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+
+    while **data.peek()? != b'\n' {
+        let header = parse_commit_header(data)?;
+        let key = header.0;
+        let values = header.1;
+        headers.entry(key).or_default().push(values);
+    }
+
+    Some(headers)
+}
+
+fn parse_tree_entry<'a, I>(data: &mut Peekable<I>) -> Option<TreeEntry>
+where
+    I: Iterator<Item = &'a u8>
+{
+    let mode: Vec<u8> = data
+        .take_while(|&&b| b != b' ')
+        .map(|&b| b)
+        .collect();
+
+    let path: Vec<u8> = data
+        .take_while(|&&b| b != b'\0')
+        .map(|&b| b)
+        .collect();
+
+    let id: Vec<u8> = data
+        .take(SHA1_HASH_SIZE)
+        .map(|&b| b)
+        .collect();
+
+    let mode = std::str::from_utf8(&mode[..]).ok()?;
+    let path = std::str::from_utf8(&path[..]).ok()?;
+
+    let path = path.to_string();
+    let mode = u32::from_str_radix(mode, 8).ok()?;
+    let id: [u8; SHA1_HASH_SIZE] = id.try_into().ok()?;
+    let kind = GitObjectStore::get(id)?.type_string();
+
+    Some(TreeEntry {
+        mode,
+        kind,
+        path,
+        id
+    })
+}
+
+/// Blob object format:
+/// <data>
+fn parse_blob(data: &[u8]) -> Option<GitObjectData> {
+    Some(GitObjectData::Blob {
+        data: data.to_vec(),
+    })
+}
+
+/// Commit object format (general structure):
+///   "tree " <tree-sha> \n
+///   "parent " <parent-sha> \n (can have multiple parent headers)
+///   "author " <user-info> \n
+///   "committer " <user-info> \n
+///   "gpgsig " <gpg-signature> \n (optional)
+///   "encoding " <encoding> \n (optional)
+///   \n
+///   <commit-message>
+///
+/// Multiline header semantics are as follows, if a space precedes
+/// a newline the space is treated as a continuation character
+/// and discarded. the newline is considered part of the header.
+///
+/// eg.
+/// "gpgsig -----BEGIN PGP SIGNATURE-----" \n
+/// " iQGzBAABCAAdFiEEgJI70ezQ5DZnHcjpujNQaGyRhgYFAmWAUvoACgkQujNQaGyR" \n
+/// " hgap0wv9Gn8gE8BPagd8txOwQuRtfOWXc1V1ovOubmt0Th2UPJDxpNDp/G+AN8kH" \n
+///  ...
+/// " -----END PGP SIGNATURE-----" \n
+fn parse_commit(data: &[u8]) -> Option<GitObjectData> {
+    let mut data = data.iter().peekable();
+
+    let headers = parse_commit_headers(&mut data)?;
+
+    if !headers.contains_key("tree") || headers.get("tree")?.is_empty() {
+        eprintln!("parse_commit(): tree or parent headers");
+        return None;
+    }
+
+    // Decode the tree hash
+    let tree_headers = headers.get("tree")?;
+    let tree = hex::decode(tree_headers.first()?).ok()?;
+    let tree: [u8; SHA1_HASH_SIZE] = tree.try_into().ok()?;
+
+    // Decode all the parent hashes
+    let mut parents = Vec::new();
+    if let Some(pv) = headers.get("parent") {
+        for p in pv {
+            let decoded = hex::decode(p).ok()?;
+            parents.push(decoded.try_into().ok()?)
+        }
+    }
+    
+    let author = headers.get("author")?
+        .first()?.to_string();
+
+    let committer = headers.get("committer")?
+        .first()?.to_string();
+
+    let encoding = headers.get("encoding")
+        .map(|e| e.first().map(String::to_string)).flatten();
+
+    let gpgsig = headers.get("gpgsig")
+        .map(|e| e.first().map(String::to_string)).flatten();
+
+    // Eat final newline before message body
+    if *data.next()? != b'\n' {
+        eprintln!("parse_commit(): can't find commit message");
+    }
+
+    let message = data.map(|&b| b).collect();
+
+    Some(GitObjectData::Commit {
+        tree,
+        parents,
+        author,
+        committer,
+        encoding,
+        gpgsig,
+        message,
+    })
+}
+
+/// Tree object format:
+///   <tree-entry>
+///
+/// <tree-entry>:
+///   <mode> ' ' <path> '\0' <sha>
+///
+/// mode is encoded as string of base-8 (octal) characters
+fn parse_tree(data: &[u8]) -> Option<GitObjectData> {
+    let mut data = data.iter().peekable();
+
+    let mut entries = Vec::new();
+
+    while !data.peek().is_none() {
+        let entry = parse_tree_entry(&mut data)?;
+        entries.push(entry);
+    }
+
+    Some(GitObjectData::Tree {
+        entries,
+    })
+}
+
 pub struct GitObjectStore;
 
 impl GitObjectStore {
-    pub fn get(id: [u8; 20]) -> Option<GitObject> {
+    pub fn get(id: [u8; SHA1_HASH_SIZE]) -> Option<GitObject> {
         let id_str = hex::encode(id);
 
         let obj_path = format!(".git/objects/{}/{}", &id_str[..2], &id_str[2..]);
         let obj_stream = File::open(obj_path).ok()?;
 
-        let mut contents = Vec::new();
+        // Raw object
+        let mut data = Vec::new();
 
+        // Decompress
         compress::zlib::Decoder::new(obj_stream)
-            .read_to_end(&mut contents).ok()?;
+            .read_to_end(&mut data).ok()?;
 
-        let mut header_content = contents
-            .splitn(2, |&byte| byte == '\0' as u8);
+        // Git object TLV encoding:
+        //  <obj-type> ' ' <byte-size> '\0' <object-data>
+        let [header, data] = data
+            .splitn(2, |&b| b == b'\0')
+            .by_ref()
+            .collect::<Vec<&[u8]>>()[..]
+            else {
+                return None;
+            };
 
-        let mut kind_size = header_content.next()?
-            .split(|&byte| byte == ' ' as u8);
+        let [kind, size] = header
+            .splitn(2, |&b| b == b' ') // FIXME: replace with split_once?
+            .by_ref()
+            .collect::<Vec<&[u8]>>()[..]
+            else {
+                return None;
+            };
 
-        let kind = kind_size.next()?;
+        let size = String::from_utf8_lossy(size).parse::<usize>().ok()?;
         
-        let size = String::from_utf8_lossy(kind_size.next()?)
-            .parse::<usize>().ok()?;
-        
-        let content = match kind {
-            b"blob" => GitObjectData::Blob {
-                data: header_content.next()?.to_vec(),
-            },
-            b"commit" => {
-                let buffer = header_content.next()?;
-                let mut lines = buffer
-                    .split(|&byte| byte == '\n' as u8);                
-                
-                let tree = lines.next()?;
-
-                if !tree.starts_with(b"tree ") {
-                    println!("Invalid commit object. Expected tree");
-                    return None;
-                }
-
-                let tree = &tree[5..];
-                let tree = hex::decode(tree).ok()?;
-                let tree: [u8; 20] = tree.try_into().ok()?;
-
-                let mut author_line = Vec::new();
-                let mut parents = Vec::new();
-                
-                while let Some(parent) = lines.next() {
-                    if !parent.starts_with(b"parent ") {
-                        author_line = parent.to_vec();
-                        break;
-                    }
-
-                    let parent = &parent[7..];
-                    let parent = hex::decode(parent).ok()?;
-
-                    parents.push(parent.try_into().ok()?);
-                }
-
-                if !author_line.starts_with(b"author ") {
-                    println!("Invalid commit object. Expected author");
-                    return None;
-                }
-                let author = &author_line[7..];
-                let author = String::from_utf8_lossy(author).to_string();
-
-                let committer = lines.next()?;
-                if !committer.starts_with(b"committer ") {
-                    println!("Invalid commit object. Expected committer");
-                    return None;
-                }
-                let committer = &committer[10..];
-                let committer = String::from_utf8_lossy(committer).to_string();
-
-                let mut encoding = None;
-                let mut next_line = lines.clone().peekable();
-                let next_line = next_line.peek()?;
-
-                if next_line.starts_with(b"encoding ") {
-                    let enc_line = &&next_line[10..];
-                    encoding = Some(String::from_utf8_lossy(enc_line).to_string());
-                }
-
-                let mut extra_headers = Vec::new();
-                let mut current_line = Vec::new();
-
-                while let Some(line) = lines.next() {
-                    /* continuation */
-                    if line.starts_with(b" ") {
-                        current_line.extend_from_slice(&line[1..]);
-                        current_line.push(b'\n');
-                        continue;
-                    }
-                    
-                    if line.starts_with(b"gpgsig ") || line.len() == 0 {
-                        if current_line.len() != 0 {
-                            extra_headers.push(ExtraHeader {
-                                name: String::from("gpgsig"),
-                                value: String::from_utf8_lossy(&current_line[..current_line.len()]).to_string(),
-                            });
-                        }
-
-                        if line.len() == 0 {
-                            break;
-                        }
-                        
-                        current_line.clear();
-                        current_line.extend_from_slice(&line[7..]);
-                        current_line.push(b'\n');
-                        continue;
-                    }
-                }
-
-                let mut message = Vec::new();
-
-                let msg_start = buffer
-                    .windows(2)
-                    .position(|delim| delim.starts_with(b"\n\n"))? + 2;
-
-                message.extend_from_slice(&buffer[msg_start..]);
-
-                GitObjectData::Commit {
-                    tree,
-                    parents,
-                    author,
-                    committer,
-                    encoding,
-                    extra_headers,
-                    message,
-                }
-            },
-            b"tree" => {
-                let buffer = header_content.next()?;
-
-                let mut entries = Vec::new();
-
-                let mut mode = Vec::new();
-                let mut name = Vec::new();
-                let mut id = Vec::new();
-
-                #[derive(Clone, Copy, PartialEq, Debug)]
-                enum State {
-                    Mode,
-                    Name,
-                    Id,
-                }
-
-                let mut state = State::Mode;
-
-                for &c in buffer {
-                    match (state, c) {
-                        (State::Mode, b' ') => {
-                            state = State::Name;
-                        },
-                        (State::Name, b'\0') => {
-                            state = State::Id;
-                        },
-                        (State::Id, _) => {
-                            id.push(c);
-
-                            if id.len() >= 20 {
-                                let id_buf = id.clone().try_into().ok()?;
-                                let mode_str = String::from_utf8_lossy(&mode).to_string();
-
-                                entries.push(TreeEntry {
-                                    mode: u32::from_str_radix(&mode_str, 8).ok()?,
-                                    kind: GitObjectStore::get(id_buf)?.to_string(),
-                                    name: String::from_utf8_lossy(&name).to_string(),
-                                    id: id_buf,
-                                });
-
-                                mode.clear();
-                                name.clear();
-                                id.clear();
-
-                                state = State::Mode;
-                            }
-                        },
-                        (State::Mode, _) => {
-                            mode.push(c);
-                        },
-                        (State::Name, _) => {
-                            name.push(c);
-                        }
-                    }
-                }
-
-                if state != State::Mode {
-                    println!("Invalid tree object");
-                    return None;
-                }
-
-                GitObjectData::Tree {
-                    entries,
-                }
-            },
+        let data = match kind {
+            b"blob" => parse_blob(data)?,
+            b"commit" => parse_commit(data)?,
+            b"tree" => parse_tree(data)?,
             b"tag" => GitObjectData::Tag {
-                object: [0xa; 20],
+                object: [0xa; SHA1_HASH_SIZE],
                 kind: String::from("unimplemented"),
                 tag: String::from("unimplemented"),
                 tagger: String::from("unimplemented"),
@@ -332,7 +367,7 @@ impl GitObjectStore {
         Some(GitObject {
             id,
             size,
-            content,
+            data,
         })
     }
 }

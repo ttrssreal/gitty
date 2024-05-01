@@ -23,17 +23,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let obj = match GitObjectStore::get(id) {
                 Some(obj) => obj,
-                None => return Err("Object not found".into())
+                None => return Err("Can't retrive object".into())
             };
 
             let mut stdout = std::io::stdout();
 
             if cat_file_args.mode.print {
-                print!("{obj}");
+                print!("{}", obj);
             }
 
-            if cat_file_args.mode.type_ {
-                println!("{}", obj.to_string());
+            if cat_file_args.mode.kind {
+                print!("{}\n", obj.type_string());
             }
 
             stdout.flush()?;

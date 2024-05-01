@@ -26,6 +26,6 @@ pub struct CatFileMode {
     #[arg(short)]
     pub print: bool,
 
-    #[arg(short)]
-    pub type_: bool,
+    #[arg(short = 't')]
+    pub kind: bool,
 }
