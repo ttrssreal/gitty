@@ -1,0 +1,6 @@
+ - [\*] parse loose object
+ - [\*] parse packed objects
+ - [\*] git fetch
+ - [\*] git merge (fast-forward)
+ - [\*] git checkout
+ - [\*] git push
