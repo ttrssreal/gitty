@@ -1,4 +1,4 @@
- - [\*] parse loose object
+ - [x] parse loose object
  - [\*] parse packed objects
  - [\*] git fetch
  - [\*] git merge (fast-forward)
