@@ -6,7 +6,7 @@ use std::iter::{Peekable, Iterator};
 use std::collections::HashMap;
 use std::option::Option;
 
-pub const SHA1_HASH_SIZE: usize = 20;
+use crate::SHA1_HASH_SIZE;
 
 // "Each entry has a sha1 identifier, pathname and mode."
 #[derive(Debug, PartialEq)]

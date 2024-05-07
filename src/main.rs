@@ -10,12 +10,13 @@ use hex;
 use object::GitObjectStore;
 
 pub const MIN_USER_HASH_LEN: usize = 4;
+pub const SHA1_HASH_SIZE: usize = 20;
 
 fn hash_from_str(id_str: &str) -> Option<[u8; 20]> {
 
     let id_len = id_str.len();
 
-    if id_len < MIN_USER_HASH_LEN || id_len > 40 {
+    if id_len < MIN_USER_HASH_LEN || id_len > SHA1_HASH_SIZE * 2 {
         eprintln!("Invalid hash length.");
         return None;
     }
