@@ -21,11 +21,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode,
             id
         }) => {
-            let id = resolve_id(&id).ok_or("Failed.")?;
+            let id = resolve_id(&id).ok_or("Invalid Object Id")?;
 
             let obj = match GitObjectStore::get(id) {
                 Some(obj) => obj,
-                None => return Err("Can't retrive object".into())
+                None => return Err("Unable to retrive object".into())
             };
 
             let mut stdout = std::io::stdout();
