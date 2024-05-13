@@ -1,128 +1,16 @@
-use std::fmt::Display;
 use std::fs::File;
-use compress;
 use std::io::Read;
-use std::iter::{Peekable, Iterator};
+use std::iter::Peekable;
 use std::collections::HashMap;
-use std::option::Option;
+use crate::store::{
+    GitObject,
+    GitObjectData, 
+    GitObjectStore,
+    TreeEntry,
+    ObjectId
+};
 
 use crate::SHA1_HASH_SIZE;
-
-// "Each entry has a sha1 identifier, pathname and mode."
-#[derive(Debug, PartialEq)]
-pub struct TreeEntry {
-    pub mode: u32,
-    pub kind: String,
-    pub path: String,
-    pub id: [u8; SHA1_HASH_SIZE],
-}
-
-#[derive(Debug, PartialEq)]
-pub enum GitObjectData {
-    Blob {
-        data: Vec<u8>,
-    },
-    Tree {
-        entries: Vec<TreeEntry>,
-    },
-    Commit {
-        tree: [u8; SHA1_HASH_SIZE],
-        parents: Vec<[u8; SHA1_HASH_SIZE]>,
-        // https://docs.github.com/en/pull-requests/committing-changes-to-your-project/creating-and-editing-commits/creating-a-commit-with-multiple-authors
-        // assuming git doesn't support multiple authors/committers
-        author: String,
-        committer: String,
-        encoding: Option<String>,
-        gpgsig: Option<String>,
-        message: Vec<u8>,
-    },
-    Tag {
-        object: [u8; SHA1_HASH_SIZE],
-        kind: String,
-        tag: String,
-        tagger: String,
-        // If signed the signature resides in the message itself
-        message: Vec<u8>,
-    },
-    
-}
-
-#[derive(Debug)]
-pub struct GitObject {
-    pub id: [u8; SHA1_HASH_SIZE],
-    pub size: usize,
-    pub data: GitObjectData,
-}
-
-impl GitObject {
-    pub fn type_string(&self) -> String {
-        match self.data {
-            GitObjectData::Blob {..} => "blob",
-            GitObjectData::Tree {..} => "tree",
-            GitObjectData::Commit {..} => "commit",
-            GitObjectData::Tag {..} => "tag",
-        }.to_string()
-    }
-}
-
-impl Display for TreeEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:06o} {} {} {}", self.mode, self.kind, hex::encode(self.id), self.path)
-    }
-}
-
-impl Display for GitObject {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match &self.data {
-            GitObjectData::Blob { data } => {
-                write!(f, "{}", String::from_utf8_lossy(&data))
-            },
-            GitObjectData::Tree { entries } => {
-                for entry in entries {
-                    writeln!(f, "{}", entry)?;
-                }
-                Ok(())
-            },
-            GitObjectData::Commit {
-                tree,
-                parents,
-                author,
-                committer,
-                encoding,
-                gpgsig,
-                message
-            } => {
-                writeln!(f, "tree {}", hex::encode(tree))?;
-
-                for parent in parents {
-                    writeln!(f, "parent {}", hex::encode(parent))?;
-                }
-
-                writeln!(f, "author {}", author)?;
-                writeln!(f, "committer {}", committer)?;
-                
-                if let Some(encoding) = encoding {
-                    writeln!(f, "encoding {}", encoding)?;
-                }
-
-                if let Some(gpgsig) = gpgsig {
-                    writeln!(f, "gpgsig {}", gpgsig)?;
-                }
-
-                write!(f, "\n")?;
-                write!(f, "{}", String::from_utf8_lossy(message))
-            },
-            GitObjectData::Tag { object, kind, tag, tagger, message } => {
-                write!(f, "object {}\n", hex::encode(object))?;
-                write!(f, "type {}\n", kind)?;
-                write!(f, "tag {}\n", tag)?;
-                write!(f, "tagger {}\n", tagger)?;
-                write!(f, "\n")?;
-                write!(f, "{}", String::from_utf8_lossy(message))
-            },
-        }
-    }
-}
 
 fn parse_header<'a, I>(data: &mut Peekable<I>) -> Option<(String, String)>
 where
@@ -190,8 +78,9 @@ where
 
     let path = path.to_string();
     let mode = u32::from_str_radix(mode, 8).ok()?;
-    let id: [u8; SHA1_HASH_SIZE] = id.try_into().ok()?;
-    let kind = GitObjectStore::get(id)?.type_string();
+
+    let id: ObjectId = id.as_slice().try_into().ok()?;
+    let kind = GitObjectStore::get(id)?.type_str().to_string();
 
     Some(TreeEntry {
         mode,
@@ -242,14 +131,14 @@ fn parse_commit(data: &[u8]) -> Option<GitObjectData> {
     // Decode the tree hash
     let tree_headers = headers.get("tree")?;
     let tree = hex::decode(tree_headers.first()?).ok()?;
-    let tree: [u8; SHA1_HASH_SIZE] = tree.try_into().ok()?;
+    let tree: ObjectId = tree.as_slice().try_into().ok()?;
 
     // Decode all the parent hashes
     let mut parents = Vec::new();
     if let Some(pv) = headers.get("parent") {
         for p in pv {
             let decoded = hex::decode(p).ok()?;
-            parents.push(decoded.try_into().ok()?)
+            parents.push(decoded.as_slice().try_into().ok()?)
         }
     }
     
@@ -322,8 +211,8 @@ fn parse_tag(data: &[u8]) -> Option<GitObjectData> {
     let tagger = headers.get("tagger")?
         .first()?.to_string();
 
-    let object: [u8; SHA1_HASH_SIZE] = hex::decode(object)
-        .ok()?.try_into().ok()?;
+    let object: ObjectId = hex::decode(object)
+        .ok()?.as_slice().try_into().ok()?;
 
     // Eat final newline before message body
     if *data.next()? != b'\n' {
@@ -341,48 +230,44 @@ fn parse_tag(data: &[u8]) -> Option<GitObjectData> {
     })
 }
 
-pub struct GitObjectStore;
+pub fn get_loose_object(id: ObjectId) -> Option<GitObject> {
+    let id_str = id.to_string();
 
-impl GitObjectStore {
-    pub fn get(id: [u8; SHA1_HASH_SIZE]) -> Option<GitObject> {
-        let id_str = hex::encode(id);
+    let obj_path = format!(".git/objects/{}/{}", &id_str[..2], &id_str[2..]);
+    let obj_stream = File::open(obj_path).ok()?;
 
-        let obj_path = format!(".git/objects/{}/{}", &id_str[..2], &id_str[2..]);
-        let obj_stream = File::open(obj_path).ok()?;
+    // Raw object
+    let mut data = Vec::new();
 
-        // Raw object
-        let mut data = Vec::new();
+    // Decompress
+    compress::zlib::Decoder::new(obj_stream)
+        .read_to_end(&mut data).ok()?;
 
-        // Decompress
-        compress::zlib::Decoder::new(obj_stream)
-            .read_to_end(&mut data).ok()?;
-
-        // Git object TLV encoding:
-        //  <obj-type> ' ' <byte-size> '\0' <object-data>
-        let [header, data] = data.splitn(2, |&b| b == b'\0')
-            .by_ref().collect::<Vec<&[u8]>>()[..] else {
-                return None;
-            };
-
-        let [kind, size] = header.splitn(2, |&b| b == b' ')
-            .by_ref().collect::<Vec<&[u8]>>()[..] else {
-                return None;
-            };
-
-        let size = String::from_utf8_lossy(size).parse::<usize>().ok()?;
-        
-        let data = match kind {
-            b"blob" => parse_blob(data)?,
-            b"commit" => parse_commit(data)?,
-            b"tree" => parse_tree(data)?,
-            b"tag" => parse_tag(data)?,
-            _ => return None
+    // Git object TLV encoding:
+    //  <obj-type> ' ' <byte-size> '\0' <object-data>
+    let [header, data] = data.splitn(2, |&b| b == b'\0')
+        .by_ref().collect::<Vec<&[u8]>>()[..] else {
+            return None;
         };
 
-        Some(GitObject {
-            id,
-            size,
-            data,
-        })
-    }
+    let [kind, size] = header.splitn(2, |&b| b == b' ')
+        .by_ref().collect::<Vec<&[u8]>>()[..] else {
+            return None;
+        };
+
+    let size = String::from_utf8_lossy(size).parse::<usize>().ok()?;
+
+    let data = match kind {
+        b"blob" => parse_blob(data)?,
+        b"commit" => parse_commit(data)?,
+        b"tree" => parse_tree(data)?,
+        b"tag" => parse_tag(data)?,
+        _ => return None
+    };
+
+    Some(GitObject {
+        id,
+        size,
+        data,
+    })
 }
