@@ -5,7 +5,6 @@ use crate::store::{
     ObjectId
 };
 use crate::SHA1_HASH_SIZE;
-use std::collections::VecDeque;
 use std::array::TryFromSliceError;
 
 pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
@@ -16,7 +15,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         return None;
     };
 
-    let mut candidates = VecDeque::new();
+    let mut candidates = Vec::new();
 
     candidates.append(&mut resolve_id_loose(id_str));
 
@@ -34,18 +33,18 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         return None;
     }
 
-    return candidates.pop_front();
+    return candidates.into_iter().next();
 }
 
-fn resolve_id_loose(id_str: &str) -> VecDeque<ObjectId> {
-    let mut matches = VecDeque::new();
+fn resolve_id_loose(id_str: &str) -> Vec<ObjectId> {
+    let mut matches = Vec::new();
 
     match_loose_ids(&mut matches, id_str);
 
     matches
 }
 
-fn match_loose_ids(matches: &mut VecDeque<ObjectId>, target_id: &str) -> Option<()> {
+fn match_loose_ids(matches: &mut Vec<ObjectId>, target_id: &str) -> Option<()> {
     let first_byte_str = &target_id[..2];
     let end_bytes_str = &target_id[2..];
 
@@ -66,7 +65,7 @@ fn match_loose_ids(matches: &mut VecDeque<ObjectId>, target_id: &str) -> Option<
 
             let id = id_str_full.try_into().ok()?;
 
-            matches.push_back(id);
+            matches.push(id);
         }
     }
 
