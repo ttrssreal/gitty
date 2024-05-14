@@ -1,5 +1,6 @@
 use crate::MIN_USER_HASH_LEN;
 use std::{fs::{self, File}, fmt};
+use std::ops::Deref;
 use crate::store::{
     StoreBackend,
     ObjectId,
@@ -139,11 +140,20 @@ impl TryFrom<&[u8]> for ObjectId {
     }
 }
 
-impl From<[u8; 20]> for ObjectId {
-    fn from(value: [u8; 20]) -> ObjectId {
+impl From<[u8; SHA1_HASH_SIZE]> for ObjectId {
+    fn from(value: [u8; SHA1_HASH_SIZE]) -> ObjectId {
         ObjectId(value)
     }
 }
+
+impl Deref for ObjectId {
+    type Target = [u8; SHA1_HASH_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
