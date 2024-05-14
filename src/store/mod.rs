@@ -1,4 +1,5 @@
 mod loose;
+mod pack;
 pub mod util;
 
 use std::fmt::Display;
@@ -16,7 +17,7 @@ pub enum StoreBackend {
     Loose
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Eq, PartialEq, Hash, Copy, Clone)]
 pub struct ObjectId([u8; SHA1_HASH_SIZE]);
 
 #[derive(Debug)]
