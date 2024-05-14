@@ -19,8 +19,17 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
 
     let mut candidates = Vec::new();
 
-    candidates.append(&mut resolve_id_loose(id_str));
-    candidates.append(&mut resolve_id_packed(id_str));
+    let id_bytes = hex::decode(id_str).ok()?;
+    let first_byte = id_bytes[0];
+
+    let mut match_beginning = |oid: ObjectId| {
+        if oid.0.starts_with(&id_bytes) {
+            candidates.push(oid);
+        }
+    };
+
+    visit_loose_ids(first_byte, &mut match_beginning);
+    visit_pack_ids(&mut match_beginning);
 
     if candidates.len() == 0 {
         eprintln!("Can't find object");
@@ -39,19 +48,11 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     return candidates.into_iter().next();
 }
 
-fn resolve_id_loose(id_str: &str) -> Vec<ObjectId> {
-    let mut matches = Vec::new();
-
-    match_loose_ids(&mut matches, id_str);
-
-    matches
-}
-
-fn match_loose_ids(matches: &mut Vec<ObjectId>, target_id: &str) -> Option<()> {
-    let first_byte_str = &target_id[..2];
-    let end_bytes_str = &target_id[2..];
-
-    let obj_dir = format!(".git/objects/{}/", first_byte_str);
+fn visit_loose_ids<T>(first_byte: u8, mut visit: T) -> Option<()>
+where
+    T: FnMut(ObjectId)
+{
+    let obj_dir = format!(".git/objects/{:02x}/", first_byte);
 
     let contents = fs::read_dir(obj_dir).ok()?;
 
@@ -63,27 +64,19 @@ fn match_loose_ids(matches: &mut Vec<ObjectId>, target_id: &str) -> Option<()> {
             .into_string()
             .ok()?;
 
-        if filename.starts_with(end_bytes_str) {
-            let id_str_full = format!("{first_byte_str}{filename}");
+        let id_str_full = format!("{first_byte:02x}{filename}");
+        let id = id_str_full.try_into().ok()?;
 
-            let id = id_str_full.try_into().ok()?;
-
-            matches.push(id);
-        }
+        visit(id);
     }
 
     Some(())
 }
 
-fn resolve_id_packed(id_str: &str) -> Vec<ObjectId> {
-    let mut matches = Vec::new();
-
-    match_pack_idx_ids(&mut matches, id_str);
-
-    matches
-}
-
-fn match_pack_idx_ids(matches: &mut Vec<ObjectId>, target_id: &str) -> Option<()> {
+fn visit_pack_ids<T>(mut visit: T) -> Option<()>
+where
+    T: FnMut(ObjectId)
+{
     let idx_files = fs::read_dir(".git/objects/pack/").ok()?;
 
     for entry in idx_files {
@@ -112,12 +105,8 @@ fn match_pack_idx_ids(matches: &mut Vec<ObjectId>, target_id: &str) -> Option<()
             .into_keys()
             .collect();
 
-        let target_id = hex::decode(target_id).ok()?;
-
         for oid in objectids {
-            if oid.0.starts_with(&target_id) {
-                matches.push(oid);
-            }
+            visit(oid)
         }
     }
 
