@@ -6,6 +6,8 @@ use crate::store::{
     ObjectId,
     pack::parse_pack_idx
 };
+use hex::FromHexError;
+use std::path::Path;
 use crate::SHA1_HASH_SIZE;
 use std::array::TryFromSliceError;
 
@@ -20,8 +22,32 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
 
     let mut candidates = Vec::new();
 
-    let id_bytes = hex::decode(id_str).ok()?;
+    let id_bytes = match hex::decode(id_str) {
+        Ok(id_bytes) => id_bytes,
+        Err(FromHexError::OddLength) => {
+            let adjusted = &id_str[..id_len-1];
+
+            let resolved_adjusted = resolve_id(adjusted);
+
+            if resolved_adjusted.is_some() {
+                eprintln!("Odd Length, truncating... \"{}\"", adjusted);
+            }
+
+            return resolved_adjusted;
+        },
+        Err(FromHexError::InvalidHexCharacter {
+            c,
+            ..
+        }) => {
+            eprintln!("Invalid hex character: {}", c);
+
+            return None;
+        }
+        _ => return None
+    };
+
     let first_byte = id_bytes[0];
+    let first_byte_hint = Some(first_byte);
 
     let mut match_beginning = |oid: ObjectId| {
         if oid.0.starts_with(&id_bytes) {
@@ -29,7 +55,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         }
     };
 
-    visit_loose_ids(first_byte, &mut match_beginning);
+    visit_loose_ids(first_byte_hint, &mut match_beginning);
     visit_pack_ids(&mut match_beginning);
 
     if candidates.len() == 0 {
@@ -49,26 +75,57 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     return candidates.into_iter().next();
 }
 
-fn visit_loose_ids<T>(first_byte: u8, mut visit: T) -> Option<()>
+fn visit_loose_ids<T>(first_byte_hint: Option<u8>, mut visit: T) -> Option<()>
 where
     T: FnMut(ObjectId)
 {
-    let obj_dir = format!(".git/objects/{:02x}/", first_byte);
+    let mut visit_obj_dir = |obj_dir_path: &Path| -> Option<()> {
+        let contents = fs::read_dir(obj_dir_path).ok()?;
 
-    let contents = fs::read_dir(obj_dir).ok()?;
+        for entry in contents {
+            let entry = entry.ok()?;
 
-    for entry in contents {
-        let entry = entry.ok()?;
+            let filename = entry
+                .file_name()
+                .into_string()
+                .ok()?;
 
-        let filename = entry
-            .file_name()
-            .into_string()
-            .ok()?;
+            let obj_path = entry.path();
+            let parent_path = obj_path.parent()?.to_str()?;
+            let first_byte = &parent_path[parent_path.len()-2..];
 
-        let id_str_full = format!("{first_byte:02x}{filename}");
-        let id = id_str_full.try_into().ok()?;
+            let id_str_full = format!("{first_byte}{filename}");
+            let id = id_str_full.try_into().ok()?;
 
-        visit(id);
+            visit(id);
+        }
+
+        Some(())
+    };
+
+    match first_byte_hint {
+        Some(first_byte) => {
+            let obj_dir = format!(".git/objects/{:02x}/", first_byte);
+
+            visit_obj_dir(Path::new(&obj_dir))?;
+        },
+        None => {
+            let store_dir = fs::read_dir(".git/objects/").ok()?;
+
+            for dir_ent in store_dir {
+                let dir_ent = dir_ent.ok()?;
+
+                let file_type = dir_ent.file_type().ok()?;
+
+                if !file_type.is_dir() {
+                    continue;
+                }
+
+                let obj_dir_path = dir_ent.path();
+
+                visit_obj_dir(&obj_dir_path)?;
+            }
+        }
     }
 
     Some(())
@@ -114,9 +171,25 @@ where
     Some(())
 }
 
-// TODO: implement this
-pub fn find_backend(_id: ObjectId) -> Option<StoreBackend> {
-    Some(StoreBackend::Loose)
+pub fn find_backend(id: ObjectId) -> Option<StoreBackend> {
+    let mut backend = None;
+
+    let first_byte = id[0];
+    let first_byte_hint = Some(first_byte);
+
+    visit_loose_ids(first_byte_hint, |oid| {
+        if oid == id {
+            backend = Some(StoreBackend::Loose);
+        }
+    });
+
+    visit_pack_ids(|oid| {
+        if oid == id {
+            backend = Some(StoreBackend::Packed);
+        }
+    });
+
+    backend
 }
 
 /// From a hex string

@@ -14,7 +14,8 @@ pub struct GitObjectStore;
 
 #[derive(Debug)]
 pub enum StoreBackend {
-    Loose
+    Loose,
+    Packed
 }
 
 #[derive(Eq, PartialEq, Hash, Copy, Clone)]
@@ -147,7 +148,8 @@ impl GitObjectStore {
         use StoreBackend::*;
 
         match util::find_backend(id)? {
-            Loose => get_loose_object(id)
+            Loose => get_loose_object(id),
+            Packed => unimplemented!("get(): packfile"),
         }
     }
 
