@@ -1,22 +1,23 @@
 use crate::MIN_USER_HASH_LEN;
-use std::{fs::{self, File}, fmt};
+use std::fs::{read_dir, File};
+use std::fmt;
 use std::ops::Deref;
+use hex::FromHexError;
+use std::path::Path;
+use crate::SHA1_HASH_SIZE;
+use std::array::TryFromSliceError;
 use crate::store::{
     StoreBackend,
     ObjectId,
     pack::parse_pack_idx
 };
-use hex::FromHexError;
-use std::path::Path;
-use crate::SHA1_HASH_SIZE;
-use std::array::TryFromSliceError;
 
 // Resolves an arbitrary length hex encoded string to an oid
 pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     let id_len = id_str.len();
 
     if id_len < MIN_USER_HASH_LEN || id_len > SHA1_HASH_SIZE * 2 {
-        eprintln!("Invalid hash length.");
+        eprintln!("Invalid hash length");
         return None;
     };
 
@@ -50,7 +51,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     let first_byte_hint = Some(first_byte);
 
     let mut match_beginning = |oid: ObjectId| {
-        if oid.0.starts_with(&id_bytes) {
+        if oid.starts_with(&id_bytes) {
             candidates.push(oid);
         }
     };
@@ -80,7 +81,7 @@ where
     T: FnMut(ObjectId)
 {
     let mut visit_obj_dir = |obj_dir_path: &Path| -> Option<()> {
-        let contents = fs::read_dir(obj_dir_path).ok()?;
+        let contents = read_dir(obj_dir_path).ok()?;
 
         for entry in contents {
             let entry = entry.ok()?;
@@ -110,7 +111,7 @@ where
             visit_obj_dir(Path::new(&obj_dir))?;
         },
         None => {
-            let store_dir = fs::read_dir(".git/objects/").ok()?;
+            let store_dir = read_dir(".git/objects/").ok()?;
 
             for dir_ent in store_dir {
                 let dir_ent = dir_ent.ok()?;
@@ -135,7 +136,7 @@ fn visit_pack_ids<T>(mut visit: T) -> Option<()>
 where
     T: FnMut(ObjectId)
 {
-    let idx_files = fs::read_dir(".git/objects/pack/").ok()?;
+    let idx_files = read_dir(".git/objects/pack/").ok()?;
 
     for entry in idx_files {
         let entry = entry.ok()?;
@@ -226,7 +227,6 @@ impl Deref for ObjectId {
         &self.0
     }
 }
-
 
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
