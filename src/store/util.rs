@@ -27,21 +27,12 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         Ok(id_bytes) => id_bytes,
         Err(FromHexError::OddLength) => {
             let adjusted = &id_str[..id_len-1];
-
-            let resolved_adjusted = resolve_id(adjusted);
-
-            if resolved_adjusted.is_some() {
-                eprintln!("Odd Length, truncating... \"{}\"", adjusted);
-            }
-
-            return resolved_adjusted;
+            return resolve_id(adjusted);
         },
         Err(FromHexError::InvalidHexCharacter {
-            c,
-            ..
+            c, ..
         }) => {
             eprintln!("Invalid hex character: {}", c);
-
             return None;
         }
         _ => return None
