@@ -6,7 +6,10 @@ pub mod util;
 use std::fmt::Display;
 use std::option::Option;
 
-use crate::store::loose::get_loose_object;
+use crate::store::{
+    loose::get_loose_object,
+    pack::get_packed_object
+};
 
 use crate::SHA1_HASH_SIZE;
 
@@ -150,7 +153,7 @@ impl GitObjectStore {
 
         match util::find_backend(id)? {
             Loose => get_loose_object(id),
-            Packed => unimplemented!("get(): packfile"),
+            Packed => get_packed_object(id)
         }
     }
 

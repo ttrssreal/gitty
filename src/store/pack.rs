@@ -1,6 +1,12 @@
 use std::fs::File;
 use std::collections::HashMap;
-use crate::store::ObjectId;
+use crate::store::{
+    object,
+    GitObjectData,
+    util,
+    ObjectId,
+    GitObject
+};
 use std::io::{BufReader, Read};
 use byteorder::{BigEndian, ReadBytesExt};
 
@@ -155,4 +161,133 @@ pub fn parse_pack_idx_v2(mut idx_reader: BufReader<File>) -> Option<GitPackIdx> 
     Some(GitPackIdx {
         locations
     })
+}
+
+#[derive(Debug)]
+enum PackedObjectKind {
+    Commit,
+    Tree,
+    Blob,
+    Tag,
+    OffsetDelta,
+    RefDelta
+}
+
+pub fn get_packed_object(id: ObjectId) -> Option<GitObject> {
+    let mut pack_name = None;
+
+    util::visit_pack_ids(true, |desc| {
+        if desc.oid == id {
+            pack_name = desc.pack_name;
+        }
+    });
+
+    let pack_name = pack_name?;
+
+    let pack_file = format!(".git/objects/pack/{}.pack", &pack_name);
+    let idx_file = format!(".git/objects/pack/{}.idx", &pack_name);
+
+    let pack_file_stream = File::open(pack_file).ok()?;
+    let idx_file_stream = File::open(idx_file).ok()?;
+
+    let pack_idx = parse_pack_idx(idx_file_stream)?;
+
+    let offset = *pack_idx.locations.get(&id)?;
+
+    let (data, size) = resolve_packed_object(offset, BufReader::new(pack_file_stream))?;
+
+    Some(GitObject {
+        id,
+        size,
+        data
+    })
+}
+
+fn resolve_packed_object(offset: usize, mut pack_reader: BufReader<File>) -> Option<(GitObjectData, usize)> {
+    let mut magic = [0u8; 4];
+    pack_reader.read_exact(&mut magic).ok()?;
+
+    if magic != "PACK".as_bytes() {
+        eprintln!("Pack file corrupted!");
+        return None;
+    }
+
+    pack_reader.seek_relative(offset as i64 - 4).ok()?;
+
+    let (kind, length) = read_kind_length_obj_header(&mut pack_reader)?;
+
+    if matches!(kind, PackedObjectKind::OffsetDelta) ||
+        matches!(kind, PackedObjectKind::OffsetDelta) {
+            unimplemented!("pack delta");
+    }
+
+    // object buffer
+    let mut data = vec![0u8; length as usize];
+
+    let mut decomp_stream = compress::zlib::Decoder::new(&mut pack_reader);
+    decomp_stream.read_exact(&mut data).ok()?;
+
+    let data = match kind {
+        PackedObjectKind::Commit => object::parse_commit(&data),
+        PackedObjectKind::Tree => object::parse_tree(&data),
+        PackedObjectKind::Blob => object::parse_blob(&data),
+        PackedObjectKind::Tag => object::parse_tag(&data),
+        PackedObjectKind::OffsetDelta | PackedObjectKind::RefDelta => None
+    };
+
+    Some((data?, length as usize))
+}
+
+// Size encoding
+//        This document uses the following "size encoding" of non-negative integers:
+//        From each byte, the seven least significant bits are used to form the resulting
+//        integer. As long as the most significant bit is 1, this process continues; the
+//        byte with MSB 0 provides the last seven bits. The seven-bit chunks are concatenated.
+//        Later values are more significant.
+fn read_kind_length_obj_header(pack_reader: &mut BufReader<File>) -> Option<(PackedObjectKind, u64)> {
+    // u64 seems good enough, if objects are bigger than 2^64 we have other problems...
+    let mut decoded: u64 = 0;
+    let mut n = 0;
+
+    let mut byte = pack_reader.read_i8().ok()?;
+    let type_mask = 0b01110000;
+
+    // n-byte type and length (3-bit type, (n-1)*7+4-bit length)
+
+    // 3-bit type
+    let kind = match (byte & type_mask) >> 4 {
+        // OBJ_COMMIT (1)
+        1 => PackedObjectKind::Commit,
+        // OBJ_TREE (2)
+        2 => PackedObjectKind::Tree,
+        // OBJ_BLOB (3)
+        3 => PackedObjectKind::Blob,
+        // OBJ_TAG (4)
+        4 => PackedObjectKind::Tag,
+        // OBJ_OFS_DELTA (6)
+        6 => PackedObjectKind::OffsetDelta,
+        // OBJ_REF_DELTA (7)
+        7 => PackedObjectKind::RefDelta,
+        _ => {
+            eprintln!("Unsupported object type!");
+            return None;
+        }
+    };
+
+    // 4-bit least significant part of length
+    decoded = (byte & 0xf) as u64;
+    n += 4;
+
+    byte = pack_reader.read_i8().ok()?;
+
+    // check MSB
+    while byte.is_negative() {
+        decoded ^= ((byte & 0x7f) as u64) << n;
+        byte = pack_reader.read_i8().ok()?;
+        n += 7;
+    }
+
+    decoded ^= ((byte & 0x7f) as u64) << n;
+
+    Some((kind, decoded))
 }
