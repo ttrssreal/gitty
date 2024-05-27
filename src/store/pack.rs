@@ -7,6 +7,10 @@ use byteorder::{BigEndian, ReadBytesExt};
 // A 4-byte magic number \377tOc
 const PACK_IDX_MAGIC: u32 = 0xff744f63;
 
+// TODO: Parsing the idx file into a big hashmap is not correct and won't
+// scale at all to larger repo's. Reimplement this all to search for entry's
+// on the fly. this is dumb :)
+#[derive(Debug)]
 pub struct GitPackIdx {
     // A map of ObjectId's to object offsets within a packfile
     pub locations: HashMap<ObjectId, usize>

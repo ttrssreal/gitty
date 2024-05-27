@@ -41,14 +41,17 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     let first_byte = id_bytes[0];
     let first_byte_hint = Some(first_byte);
 
-    let mut match_beginning = |oid: ObjectId| {
+    visit_loose_ids(first_byte_hint, |oid| {
         if oid.starts_with(&id_bytes) {
             candidates.push(oid);
         }
-    };
+    });
 
-    visit_loose_ids(first_byte_hint, &mut match_beginning);
-    visit_pack_ids(&mut match_beginning);
+    visit_pack_ids(false, |PackObjectDesc { oid, .. }| {
+        if oid.starts_with(&id_bytes) {
+            candidates.push(oid);
+        }
+    });
 
     if candidates.len() == 0 {
         eprintln!("Can't find object");
@@ -67,7 +70,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     return candidates.into_iter().next();
 }
 
-fn visit_loose_ids<T>(first_byte_hint: Option<u8>, mut visit: T) -> Option<()>
+pub fn visit_loose_ids<T>(first_byte_hint: Option<u8>, mut visit: T) -> Option<()>
 where
     T: FnMut(ObjectId)
 {
@@ -123,9 +126,14 @@ where
     Some(())
 }
 
-fn visit_pack_ids<T>(mut visit: T) -> Option<()>
+pub struct PackObjectDesc {
+    pub oid: ObjectId,
+    pub pack_name: Option<String>
+}
+
+pub fn visit_pack_ids<T>(include_pack_name: bool, mut visit: T) -> Option<()>
 where
-    T: FnMut(ObjectId)
+    T: FnMut(PackObjectDesc)
 {
     let idx_files = read_dir(".git/objects/pack/").ok()?;
 
@@ -144,9 +152,9 @@ where
             continue;
         }
 
-        let filename = format!(".git/objects/pack/{}", filename);
+        let idx_path = format!(".git/objects/pack/{}", filename);
 
-        let file_stream = File::open(filename).ok()?;
+        let file_stream = File::open(idx_path).ok()?;
 
         // TODO: fix: we disregard offsets, and therefore do unnecessary work here :(
         let pack_idx = parse_pack_idx(file_stream)?;
@@ -156,7 +164,16 @@ where
             .collect();
 
         for oid in objectids {
-            visit(oid)
+            let pack_object_descriptor = PackObjectDesc {
+                oid,
+                pack_name: if include_pack_name {
+                    filename.strip_suffix(".idx").map(|f| f.to_string())
+                } else {
+                    None
+                }
+            };
+
+            visit(pack_object_descriptor)
         }
     }
 
@@ -175,7 +192,7 @@ pub fn find_backend(id: ObjectId) -> Option<StoreBackend> {
         }
     });
 
-    visit_pack_ids(|oid| {
+    visit_pack_ids(false, |PackObjectDesc { oid, .. }| {
         if oid == id {
             backend = Some(StoreBackend::Packed);
         }
