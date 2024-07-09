@@ -1,5 +1,5 @@
  - [x] parse loose object
- - [ ] parse packed objects
+ - [x] parse packed objects
  - [ ] git fetch
  - [ ] git merge (fast-forward)
  - [ ] git checkout
