@@ -5,9 +5,15 @@ use crate::store::{
     GitObjectData,
     util,
     ObjectId,
-    GitObject
+    GitObject,
+    delta::resolve_delta
 };
-use std::io::{BufReader, Read};
+use std::io::{
+    BufReader,
+    Read,
+    Seek,
+    SeekFrom,
+};
 use byteorder::{BigEndian, ReadBytesExt};
 
 // A 4-byte magic number \377tOc
@@ -164,15 +170,26 @@ pub fn parse_pack_idx_v2(mut idx_reader: BufReader<File>) -> Option<GitPackIdx> 
 }
 
 #[derive(Debug)]
-enum PackedObjectKind {
+pub enum DeltaKind {
+    Offset,
+    Reference,
+}
+
+#[derive(Debug)]
+pub enum ObjectKind {
     Commit,
     Tree,
     Blob,
-    Tag,
-    OffsetDelta,
-    RefDelta
+    Tag
 }
 
+#[derive(Debug)]
+pub enum PackedObjectKind {
+    Object(ObjectKind),
+    Delta(DeltaKind)
+}
+
+/// Fetch an object from some packfile
 pub fn get_packed_object(id: ObjectId) -> Option<GitObject> {
     let mut pack_name = None;
 
@@ -193,17 +210,8 @@ pub fn get_packed_object(id: ObjectId) -> Option<GitObject> {
     let pack_idx = parse_pack_idx(idx_file_stream)?;
 
     let offset = *pack_idx.locations.get(&id)?;
+    let mut pack_reader = BufReader::new(pack_file_stream);
 
-    let (data, size) = resolve_packed_object(offset, BufReader::new(pack_file_stream))?;
-
-    Some(GitObject {
-        id,
-        size,
-        data
-    })
-}
-
-fn resolve_packed_object(offset: usize, mut pack_reader: BufReader<File>) -> Option<(GitObjectData, usize)> {
     let mut magic = [0u8; 4];
     pack_reader.read_exact(&mut magic).ok()?;
 
@@ -212,62 +220,112 @@ fn resolve_packed_object(offset: usize, mut pack_reader: BufReader<File>) -> Opt
         return None;
     }
 
-    pack_reader.seek_relative(offset as i64 - 4).ok()?;
+    pack_reader.seek(SeekFrom::Start(offset as u64)).ok()?;
 
-    let (kind, length) = read_kind_length_obj_header(&mut pack_reader)?;
+    let (data, size) = parse_packed_object_and_size(pack_reader)?;
 
-    if matches!(kind, PackedObjectKind::OffsetDelta) ||
-        matches!(kind, PackedObjectKind::OffsetDelta) {
-            unimplemented!("pack delta");
-    }
-
-    // object buffer
-    let mut data = vec![0u8; length as usize];
-
-    let mut decomp_stream = compress::zlib::Decoder::new(&mut pack_reader);
-    decomp_stream.read_exact(&mut data).ok()?;
-
-    let data = match kind {
-        PackedObjectKind::Commit => object::parse_commit(&data),
-        PackedObjectKind::Tree => object::parse_tree(&data),
-        PackedObjectKind::Blob => object::parse_blob(&data),
-        PackedObjectKind::Tag => object::parse_tag(&data),
-        PackedObjectKind::OffsetDelta | PackedObjectKind::RefDelta => None
-    };
-
-    Some((data?, length as usize))
+    Some(GitObject {
+        id,
+        size,
+        data
+    })
 }
 
-// Size encoding
-//        This document uses the following "size encoding" of non-negative integers:
-//        From each byte, the seven least significant bits are used to form the resulting
-//        integer. As long as the most significant bit is 1, this process continues; the
-//        byte with MSB 0 provides the last seven bits. The seven-bit chunks are concatenated.
-//        Later values are more significant.
-fn read_kind_length_obj_header(pack_reader: &mut BufReader<File>) -> Option<(PackedObjectKind, u64)> {
+fn parse_object(kind: ObjectKind, data: &[u8]) -> Option<GitObjectData> {
+    use ObjectKind::*;
+
+    match kind {
+        Commit => object::parse_commit(&data),
+        Tree => object::parse_tree(&data),
+        Blob => object::parse_blob(&data),
+        Tag => object::parse_tag(&data),
+    }
+}
+
+fn parse_packed_object_and_size(mut pack_reader: BufReader<File>)
+    -> Option<(GitObjectData, usize)>
+{
+    use PackedObjectKind::*;
+
+    let start_offset = pack_reader.stream_position().ok()?;
+
+    // n-byte type and length (3-bit type, (n-1)*7+4-bit length)
+    let (kind, length) = read_kind_length_obj_header(&mut pack_reader)?;
+
+    let object = match kind {
+        // (undeltified representation)
+        //   compressed data
+        Object(object_kind) => {
+            // object buffer
+            let mut data = vec![0u8; length as usize];
+
+            let mut decomp_stream = compress::zlib::Decoder::new(&mut pack_reader);
+            decomp_stream.read_exact(&mut data).ok()?;
+
+            parse_object(object_kind, &data)
+        },
+        // (deltified representation)
+        //   base object name if OBJ_REF_DELTA or a negative relative
+        //       offset from the delta object's position in the pack if this
+        //       is an OBJ_OFS_DELTA object
+        //   compressed delta data
+        Delta(_) => {
+            pack_reader.seek(SeekFrom::Start(start_offset)).ok()?;
+
+            let (kind, resolved) = resolve_delta(&mut pack_reader)?;
+
+            match kind {
+                Object(object_kind) => { parse_object(object_kind, &resolved) },
+                _ => {
+                    eprintln!("Failed to resolve deltas.");
+                    None
+                }
+            }
+
+        }
+        // let mut id_buf = [0u8; SHA1_HASH_SIZE];
+        // pack_reader.read_exact(&mut id_buf).ok()?;
+        // let id: ObjectId = id_buf.into();
+    };
+
+    Some((object?, length as usize))
+}
+
+// reads an "n-byte type and length (3-bit type, (n-1)*7+4-bit length)"
+pub fn read_kind_length_obj_header<R>(pack_reader: &mut R) -> Option<(PackedObjectKind, u64)>
+where
+    R: Read
+{
+    // Size encoding
+    //        This document uses the following "size encoding" of non-negative integers:
+    //        From each byte, the seven least significant bits are used to form the resulting
+    //        integer. As long as the most significant bit is 1, this process continues; the
+    //        byte with MSB 0 provides the last seven bits. The seven-bit chunks are concatenated.
+    //        Later values are more significant.
+
+    use PackedObjectKind::*;
+
     // u64 seems good enough, if objects are bigger than 2^64 we have other problems...
-    let mut decoded: u64 = 0;
+    let mut decoded;
     let mut n = 0;
 
     let mut byte = pack_reader.read_i8().ok()?;
     let type_mask = 0b01110000;
 
-    // n-byte type and length (3-bit type, (n-1)*7+4-bit length)
-
     // 3-bit type
     let kind = match (byte & type_mask) >> 4 {
         // OBJ_COMMIT (1)
-        1 => PackedObjectKind::Commit,
+        1 => Object(ObjectKind::Commit),
         // OBJ_TREE (2)
-        2 => PackedObjectKind::Tree,
+        2 => Object(ObjectKind::Tree),
         // OBJ_BLOB (3)
-        3 => PackedObjectKind::Blob,
+        3 => Object(ObjectKind::Blob),
         // OBJ_TAG (4)
-        4 => PackedObjectKind::Tag,
+        4 => Object(ObjectKind::Tag),
         // OBJ_OFS_DELTA (6)
-        6 => PackedObjectKind::OffsetDelta,
+        6 => Delta(DeltaKind::Offset),
         // OBJ_REF_DELTA (7)
-        7 => PackedObjectKind::RefDelta,
+        7 => Delta(DeltaKind::Reference),
         _ => {
             eprintln!("Unsupported object type!");
             return None;
@@ -278,16 +336,12 @@ fn read_kind_length_obj_header(pack_reader: &mut BufReader<File>) -> Option<(Pac
     decoded = (byte & 0xf) as u64;
     n += 4;
 
-    byte = pack_reader.read_i8().ok()?;
-
     // check MSB
     while byte.is_negative() {
-        decoded ^= ((byte & 0x7f) as u64) << n;
         byte = pack_reader.read_i8().ok()?;
+        decoded |= ((byte & 0x7f) as u64) << n;
         n += 7;
     }
-
-    decoded ^= ((byte & 0x7f) as u64) << n;
 
     Some((kind, decoded))
 }

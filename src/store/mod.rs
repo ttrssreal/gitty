@@ -1,6 +1,7 @@
 mod loose;
 mod pack;
 mod object;
+mod delta;
 pub mod util;
 
 use std::fmt::Display;
