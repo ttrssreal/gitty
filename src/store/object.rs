@@ -60,17 +60,17 @@ pub fn parse_commit(data: &[u8]) -> Option<GitObjectData> {
         .first()?.to_string();
 
     let encoding = headers.get("encoding")
-        .map(|e| e.first().map(String::to_string)).flatten();
+        .and_then(|e| e.first().map(String::to_string));
 
     let gpgsig = headers.get("gpgsig")
-        .map(|e| e.first().map(String::to_string)).flatten();
+        .and_then(|e| e.first().map(String::to_string));
 
     // Eat final newline before message body
     if *data.next()? != b'\n' {
         eprintln!("parse_commit(): can't find commit message");
     }
 
-    let message = data.map(|&b| b).collect();
+    let message = data.copied().collect();
 
     Some(GitObjectData::Commit {
         tree,
@@ -95,7 +95,7 @@ pub fn parse_tree(data: &[u8]) -> Option<GitObjectData> {
 
     let mut entries = Vec::new();
 
-    while !data.peek().is_none() {
+    while data.peek().is_some() {
         let entry = parse_tree_entry(&mut data)?;
         entries.push(entry);
     }
@@ -130,7 +130,7 @@ pub fn parse_tag(data: &[u8]) -> Option<GitObjectData> {
         eprintln!("parse_commit(): can't find commit message");
     }
 
-    let message = data.map(|&b| b).collect();
+    let message = data.copied().collect();
 
     Some(GitObjectData::Tag {
         object,
@@ -145,14 +145,12 @@ fn parse_header<'a, I>(data: &mut Peekable<I>) -> Option<(String, String)>
 where
     I: Iterator<Item = &'a u8>
 {
-    let header_key: Vec<u8> = data.take_while(|&b| *b != b' ')
-        .map(|&b| b).collect();
+    let header_key: Vec<u8> = data.take_while(|&b| *b != b' ').copied().collect();
 
     let mut header_value = Vec::new();
 
     loop {
-        let line: Vec<u8> = data.take_while(|&b| *b != b'\n')
-            .map(|&b| b).collect();
+        let line: Vec<u8> = data.take_while(|&b| *b != b'\n').copied().collect();
 
         header_value.extend(line);
 
@@ -193,14 +191,11 @@ fn parse_tree_entry<'a, I>(data: &mut Peekable<I>) -> Option<TreeEntry>
 where
     I: Iterator<Item = &'a u8>
 {
-    let mode: Vec<u8> = data.take_while(|&&b| b != b' ')
-        .map(|&b| b).collect();
+    let mode: Vec<u8> = data.take_while(|&&b| b != b' ').copied().collect();
 
-    let path: Vec<u8> = data.take_while(|&&b| b != b'\0')
-        .map(|&b| b).collect();
+    let path: Vec<u8> = data.take_while(|&&b| b != b'\0').copied().collect();
 
-    let id: Vec<u8> = data.take(SHA1_HASH_SIZE)
-        .map(|&b| b).collect();
+    let id: Vec<u8> = data.take(SHA1_HASH_SIZE).copied().collect();
 
     let mode = std::str::from_utf8(&mode[..]).ok()?;
     let path = std::str::from_utf8(&path[..]).ok()?;

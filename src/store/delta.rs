@@ -111,7 +111,7 @@ pub fn resolve_delta(delta_object: &mut BufReader<File>) -> Option<(PackedObject
         }
     }
 
-    if delta_stack.len() == 0 {
+    if delta_stack.is_empty() {
         eprintln!("No delta to resolve.");
         return None;
     }
@@ -170,7 +170,7 @@ pub fn apply_delta(
                     let field_data: u64 = instructions[data_pointer] as u64;
                     match field {
                         0..=3=> { offset |= field_data << (field * 8); }
-                        4.. => { size |= field_data << (field - 4) * 8; }
+                        4.. => { size |= field_data << ((field - 4) * 8); }
                     };
                 }
             }

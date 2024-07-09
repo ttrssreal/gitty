@@ -235,10 +235,10 @@ fn parse_object(kind: ObjectKind, data: &[u8]) -> Option<GitObjectData> {
     use ObjectKind::*;
 
     match kind {
-        Commit => object::parse_commit(&data),
-        Tree => object::parse_tree(&data),
-        Blob => object::parse_blob(&data),
-        Tag => object::parse_tag(&data),
+        Commit => object::parse_commit(data),
+        Tree => object::parse_tree(data),
+        Blob => object::parse_blob(data),
+        Tag => object::parse_tag(data),
     }
 }
 

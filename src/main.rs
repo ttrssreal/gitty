@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if mode.kind {
-                print!("{}\n", obj.type_str());
+                println!("{}", obj.type_str());
             }
 
             stdout.flush()?;

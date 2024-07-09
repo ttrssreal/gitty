@@ -16,7 +16,7 @@ use crate::store::{
 pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
     let id_len = id_str.len();
 
-    if id_len < MIN_USER_HASH_LEN || id_len > SHA1_HASH_SIZE * 2 {
+    if !(MIN_USER_HASH_LEN..=SHA1_HASH_SIZE * 2).contains(&id_len) {
         eprintln!("Invalid hash length");
         return None;
     };
@@ -53,7 +53,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         }
     });
 
-    if candidates.len() == 0 {
+    if candidates.is_empty() {
         eprintln!("Can't find object");
         return None;
     }
@@ -67,7 +67,7 @@ pub fn resolve_id(id_str: &str) -> Option<ObjectId> {
         return None;
     }
 
-    return candidates.into_iter().next();
+    candidates.into_iter().next()
 }
 
 pub fn visit_loose_ids<T>(first_byte_hint: Option<u8>, mut visit: T) -> Option<()>

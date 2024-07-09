@@ -97,7 +97,7 @@ impl Display for GitObject {
             GitObjectData::Blob {
                 data
             } => {
-                write!(f, "{}", String::from_utf8_lossy(&data))
+                write!(f, "{}", String::from_utf8_lossy(data))
             },
             GitObjectData::Tree {
                 entries
@@ -128,15 +128,15 @@ impl Display for GitObject {
                 if let Some(gpgsig) = gpgsig {
                     writeln!(f, "gpgsig {}", gpgsig)?;
                 }
-                write!(f, "\n")?;
+                writeln!(f)?;
                 write!(f, "{}", String::from_utf8_lossy(message))
             },
             GitObjectData::Tag { object, kind, tag, tagger, message } => {
-                write!(f, "object {}\n", object)?;
-                write!(f, "type {}\n", kind)?;
-                write!(f, "tag {}\n", tag)?;
-                write!(f, "tagger {}\n", tagger)?;
-                write!(f, "\n")?;
+                writeln!(f, "object {}", object)?;
+                writeln!(f, "type {}", kind)?;
+                writeln!(f, "tag {}", tag)?;
+                writeln!(f, "tagger {}", tagger)?;
+                writeln!(f)?;
                 write!(f, "{}", String::from_utf8_lossy(message))
             },
         }
